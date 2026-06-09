@@ -30,7 +30,7 @@ jobs:
       - name: Run the scanner once
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-          MIN_WATCH_SCORE_TO_ALERT: '45'
+          MIN_WATCH_SCORE_TO_ALERT: '55'
           ENABLE_PRICE_CONFIRMATION: '1'
           ALLOW_MICROCAPS: '0'
           DATABASE_PATH: 'scanner.db'
