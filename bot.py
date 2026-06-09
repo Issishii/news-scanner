@@ -113,22 +113,27 @@ def process_once():
             continue
         new_count += 1
 
-        to_alert, result = process_article(article)
+        try:
+            to_alert, result = process_article(article)
 
-        if to_alert:
-            message = alerts.format_alert(
-                {
-                    "title": article["title"], "link": article.get("link", ""),
-                    "source": article["source"], "market": article.get("market", "?"),
-                    "events": result.events, "themes": result.themes,
-                    "reasons": result.reasons,
-                },
-                to_alert,
-            )
-            alerts.send_alert(message)
-            alert_count += 1
-
-        storage.mark_seen(article_id, article["title"], article.get("link", ""), article["source"])
+            if to_alert:
+                message = alerts.format_alert(
+                    {
+                        "title": article["title"], "link": article.get("link", ""),
+                        "source": article["source"], "market": article.get("market", "?"),
+                        "events": result.events, "themes": result.themes,
+                        "reasons": result.reasons,
+                    },
+                    to_alert,
+                )
+                alerts.send_alert(message)
+                alert_count += 1
+        except Exception as exc:  # noqa: BLE001
+            # One problematic article must never bring down the whole scan.
+            log.warning("Skipping an article after an error: %s", exc)
+        finally:
+            # Mark it seen either way so we do not retry a bad article forever.
+            storage.mark_seen(article_id, article["title"], article.get("link", ""), article["source"])
 
     log.info("Cycle complete: %d new, %d alerts.", new_count, alert_count)
 
