@@ -1,0 +1,45 @@
+name: Market scanner
+
+on:
+  schedule:
+    - cron: '*/15 * * * *'   # every 15 minutes (UTC). May run a few minutes late.
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: market-scanner
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get the code and saved database
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run the scanner once
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          MIN_WATCH_SCORE_TO_ALERT: '45'
+          ENABLE_PRICE_CONFIRMATION: '0'
+          ALLOW_MICROCAPS: '0'
+          DATABASE_PATH: 'scanner.db'
+        run: python scan_once.py
+
+      - name: Save the database back to the repo
+        run: |
+          git config user.name "scanner-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add -f scanner.db
+          git diff --cached --quiet || git commit -m "Update scanner state [skip ci]"
+          git push
