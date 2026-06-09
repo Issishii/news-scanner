@@ -32,6 +32,11 @@ DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
 
 POLL_INTERVAL_SECONDS = int(os.getenv("POLL_INTERVAL_SECONDS", "120"))
 
+# Ignore any article whose publish date is older than this many hours. This is
+# what stops stale items sitting in a feed from being alerted on. Articles with
+# no usable date are kept (treated as unknown rather than old).
+MAX_ARTICLE_AGE_HOURS = int(os.getenv("MAX_ARTICLE_AGE_HOURS", "48"))
+
 # Only surface a ticker as an alert when its overall watch score clears this
 # floor (0 to 100). Raise it to make the scanner quieter.
 MIN_WATCH_SCORE_TO_ALERT = int(os.getenv("MIN_WATCH_SCORE_TO_ALERT", "45"))
