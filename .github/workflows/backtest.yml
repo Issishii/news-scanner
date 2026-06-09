@@ -1,0 +1,33 @@
+name: Backtest
+
+on:
+  workflow_dispatch:
+    inputs:
+      min_age_days:
+        description: "Only score signals at least this many days old"
+        default: "5"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get the code and saved database
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run the backtest
+        env:
+          DATABASE_PATH: 'scanner.db'
+          MIN_AGE: ${{ inputs.min_age_days }}
+        run: python -c "import os, backtest; backtest.run_backtest(min_age_days=float(os.environ['MIN_AGE']))"
