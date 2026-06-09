@@ -21,6 +21,7 @@ Press Ctrl+C to stop.
 """
 
 import logging
+import os
 import time
 
 try:
@@ -106,7 +107,11 @@ def process_once():
     articles = sources.fetch_all()
     log.info("Total articles fetched this cycle: %d", len(articles))
 
+    # If set, post only the hot-list digest, not a card per story (quietest mode).
+    summary_only = os.getenv("DISCORD_SUMMARY_ONLY", "0") in ("1", "true", "True")
+
     new_count = alert_count = 0
+    hot = []  # every alerting ticker this scan, for the digest
     for article in articles:
         article_id = storage.make_article_id(article["link"], article["title"])
         if storage.is_seen(article_id):
@@ -117,23 +122,34 @@ def process_once():
             to_alert, result = process_article(article)
 
             if to_alert:
-                message = alerts.format_alert(
-                    {
-                        "title": article["title"], "link": article.get("link", ""),
-                        "source": article["source"], "market": article.get("market", "?"),
-                        "events": result.events, "themes": result.themes,
-                        "reasons": result.reasons,
-                    },
-                    to_alert,
-                )
-                alerts.send_alert(message)
+                meta = {
+                    "title": article["title"], "link": article.get("link", ""),
+                    "source": article["source"], "market": article.get("market", "?"),
+                    "events": result.events, "themes": result.themes,
+                    "reasons": result.reasons,
+                }
+                if not summary_only:
+                    text = alerts.format_alert(meta, to_alert)
+                    embeds = alerts.build_discord_embeds(meta, to_alert)
+                    alerts.send_alert(text, embeds=embeds)
                 alert_count += 1
+                for r in to_alert:
+                    hot.append({"ticker": r["ticker"], "label": r["watch_label"],
+                                "score": r["overall_watch_score"]})
         except Exception as exc:  # noqa: BLE001
             # One problematic article must never bring down the whole scan.
             log.warning("Skipping an article after an error: %s", exc)
         finally:
             # Mark it seen either way so we do not retry a bad article forever.
             storage.mark_seen(article_id, article["title"], article.get("link", ""), article["source"])
+
+    # End-of-scan digest of the hottest names.
+    if hot:
+        try:
+            digest = alerts.build_hotlist_embed(hot, alert_count)
+            alerts.send_alert("Hot list (this scan)", embeds=[digest])
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Could not send hot-list digest: %s", exc)
 
     log.info("Cycle complete: %d new, %d alerts.", new_count, alert_count)
 

@@ -2,14 +2,15 @@
 alerts.py
 =========
 
-Formats and sends scanner alerts to Telegram and/or Discord (console fallback
-if neither is configured).
+Formats and sends scanner alerts. For Discord it now builds clean "embed"
+cards (coloured bar by label, headline as a clickable title, tickers laid out
+in tidy columns, scores in a compact block). Telegram and console get a plain
+text version as a fallback.
 
 Hard rule: the scanner never gives a trade instruction. It speaks only in the
 fixed watch-only labels. assert_no_trade_language() polices the scanner's OWN
-wording. It deliberately ignores the quoted news headline and source name,
-because real headlines often contain words like "sell off" or "short sellers"
-and quoting the news is not the same as the scanner telling you to trade.
+wording and ignores the quoted headline and source name, because real
+headlines often contain words like "sell off".
 """
 
 import logging
@@ -21,18 +22,22 @@ import config
 
 log = logging.getLogger("alerts")
 
-# Words the scanner must never emit as its own instruction.
 _FORBIDDEN = re.compile(r"\b(buy|sell|short|long the|go long|go short)\b", re.IGNORECASE)
+
+# Colour down the side of each Discord embed, chosen by the strongest label.
+LABEL_COLORS = {
+    "High priority watch": 0x2ECC71,  # green
+    "Direct beneficiary":  0x3498DB,  # blue
+    "Sympathy watch":      0x9B59B6,  # purple
+    "Too speculative":     0xE67E22,  # orange
+    "Ignore":              0x7F8C8D,  # grey
+}
+HOTLIST_COLOR = 0xF1C40F             # gold
+FOOTER = "Watch-only signal. Confirm against the source. Not financial advice."
+MAX_FIELDS = 6                        # tickers shown per card
 
 
 def assert_no_trade_language(message: str, exempt=()):
-    """
-    Raise if a trade instruction appears in the scanner's own wording.
-
-    `exempt` is a list of strings (the quoted headline, the source name) that
-    are third-party text, not the scanner's voice. They are removed before the
-    check so a headline like "stocks sell off" cannot trip the guard.
-    """
     checked = message
     for piece in exempt:
         if piece:
@@ -44,13 +49,87 @@ def assert_no_trade_language(message: str, exempt=()):
         )
 
 
+def _short(text, limit):
+    return text if len(text) <= limit else text[: limit - 3] + "..."
+
+
+# ---------------------------------------------------------------------------
+# Discord embeds (the nice version)
+# ---------------------------------------------------------------------------
+def build_discord_embeds(article, ticker_results):
+    """Return a list with one embed card for this article."""
+    title = article["title"]
+    source = article["source"]
+    link = article.get("link", "")
+    events = ", ".join(e.replace("_", " ") for e in article.get("events", [])) or "none"
+    themes = ", ".join(t.replace("_", " ") for t in article.get("themes", [])) or "none"
+
+    top_label = ticker_results[0]["watch_label"] if ticker_results else "Ignore"
+
+    desc = f"**Event:** {events}\n**Themes:** {themes}  ·  **Market:** {article.get('market', '?')}"
+    if article.get("reasons"):
+        desc += "\n\n" + " ".join(article["reasons"][:2])
+    desc = _short(desc, 4000)
+
+    fields = []
+    for r in ticker_results[:MAX_FIELDS]:
+        fields.append({
+            "name": f"{r['ticker']}  |  {r['watch_label']}",
+            "value": (
+                f"**{r['overall_watch_score']}/100**\n"
+                f"news {r['news_urgency_score']} · theme {r['theme_relevance_score']} · "
+                f"direct {r['directness_score']}\n"
+                f"liq {r['liquidity_score']} · react {r['price_reaction_score']} · "
+                f"chase {r['chase_risk_score']}"
+            ),
+            "inline": True,
+        })
+    extra = len(ticker_results) - MAX_FIELDS
+    if extra > 0:
+        fields.append({"name": "More", "value": f"+{extra} other tickers below the top {MAX_FIELDS}", "inline": False})
+
+    # Police the scanner's own words (labels, scores, reasons), never the headline.
+    guard_text = desc + " " + " ".join(f["name"] + " " + f["value"] for f in fields)
+    assert_no_trade_language(guard_text, exempt=[title, source])
+
+    embed = {
+        "title": _short(title, 250),
+        "description": desc,
+        "color": LABEL_COLORS.get(top_label, 0x7F8C8D),
+        "fields": fields,
+        "footer": {"text": FOOTER},
+    }
+    if link:
+        embed["url"] = link
+    return [embed]
+
+
+def build_hotlist_embed(hot, scanned_count):
+    """One digest card listing the hottest tickers across the whole scan."""
+    best = {}
+    for h in hot:
+        if h["ticker"] not in best or h["score"] > best[h["ticker"]]["score"]:
+            best[h["ticker"]] = h
+    ranked = sorted(best.values(), key=lambda x: x["score"], reverse=True)[:10]
+
+    if ranked:
+        lines = [f"`{h['score']:>3}`  **{h['ticker']}**  ·  {h['label']}" for h in ranked]
+        desc = "\n".join(lines)
+    else:
+        desc = "Nothing cleared the threshold this scan."
+
+    return {
+        "title": "Hot list (this scan)",
+        "description": _short(desc, 4000),
+        "color": HOTLIST_COLOR,
+        "footer": {"text": f"{scanned_count} alerting stories this scan  ·  {FOOTER}"},
+    }
+
+
+# ---------------------------------------------------------------------------
+# Plain text version (Telegram / console fallback)
+# ---------------------------------------------------------------------------
 def format_alert(article, ticker_results) -> str:
-    """
-    article: dict with title, link, source, market, plus scan-level fields
-             (events, themes, reasons).
-    ticker_results: list of per-ticker score bundles plus 'ticker' and
-                    'directness'. Already filtered and sorted by the caller.
-    """
     title = article["title"]
     source = article["source"]
     link = article.get("link", "")
@@ -58,53 +137,36 @@ def format_alert(article, ticker_results) -> str:
     themes = ", ".join(t.replace("_", " ") for t in article.get("themes", [])) or "none"
 
     lines = [
-        "*MARKET EVENT SCANNER*  (watch-only, not advice)",
+        "MARKET EVENT SCANNER (watch-only, not advice)",
         "",
-        f"*Headline:* {title}",
-        f"*Source:* {source}  |  *Market:* {article.get('market', '?')}",
-        f"*Event type:* {events}",
-        f"*Themes:* {themes}",
+        f"Headline: {title}",
+        f"Source: {source} | Market: {article.get('market', '?')}",
+        f"Event type: {events}",
+        f"Themes: {themes}",
         "",
-        "*Tickers to watch:*",
+        "Tickers to watch:",
     ]
-
     for r in ticker_results:
-        meter = _meter(r["overall_watch_score"])
+        lines.append(f"  {r['ticker']}  [{r['watch_label']}]  score {r['overall_watch_score']}/100")
         lines.append(
-            f"  {r['ticker']}  [{r['watch_label']}]  score {r['overall_watch_score']}/100 {meter}"
+            f"      direct {r['directness_score']} | news {r['news_urgency_score']} | "
+            f"theme {r['theme_relevance_score']} | liq {r['liquidity_score']} | "
+            f"react {r['price_reaction_score']} | chase {r['chase_risk_score']}"
         )
-        lines.append(
-            "      directness {d} | news {n} | theme {t} | liq {l} | "
-            "reaction {p} | chase-risk {c}".format(
-                d=r["directness"].replace("_", " "),
-                n=r["news_urgency_score"], t=r["theme_relevance_score"],
-                l=r["liquidity_score"], p=r["price_reaction_score"],
-                c=r["chase_risk_score"],
-            )
-        )
-
     if article.get("reasons"):
         lines.append("")
-        lines.append("*Why it may matter:*")
+        lines.append("Why it may matter:")
         for reason in article["reasons"]:
             lines.append(f"  - {reason}")
-
     if link:
         lines.append("")
-        lines.append(f"*Link:* {link}")
-
+        lines.append(f"Link: {link}")
     lines.append("")
-    lines.append("_Watch-only signal. Confirm against the primary source. Not financial advice._")
+    lines.append(FOOTER)
 
     message = "\n".join(lines)
-    # Police the scanner's own wording, but never the quoted headline or source.
     assert_no_trade_language(message, exempt=[title, source])
     return message
-
-
-def _meter(score_100):
-    filled = round(score_100 / 10)
-    return "[" + "#" * filled + "." * (10 - filled) + "]"
 
 
 # ---------------------------------------------------------------------------
@@ -115,10 +177,7 @@ def send_telegram(message: str) -> bool:
         return False
     url = f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}/sendMessage"
     try:
-        resp = requests.post(url, data={
-            "chat_id": config.TELEGRAM_CHAT_ID, "text": message,
-            "parse_mode": "Markdown", "disable_web_page_preview": False,
-        }, timeout=15)
+        resp = requests.post(url, data={"chat_id": config.TELEGRAM_CHAT_ID, "text": message}, timeout=15)
         resp.raise_for_status()
         return True
     except requests.RequestException as exc:
@@ -126,7 +185,7 @@ def send_telegram(message: str) -> bool:
         return False
 
 
-def send_discord(message: str) -> bool:
+def send_discord_text(message: str) -> bool:
     if not config.DISCORD_WEBHOOK_URL:
         return False
     if len(message) > 1900:
@@ -136,20 +195,32 @@ def send_discord(message: str) -> bool:
         resp.raise_for_status()
         return True
     except requests.RequestException as exc:
-        log.error("Discord send failed: %s", exc)
+        log.error("Discord text send failed: %s", exc)
         return False
 
 
-def send_alert(message: str):
-    """Dispatch to every configured channel, with a console fallback."""
+def send_discord_embeds(embeds) -> bool:
+    if not config.DISCORD_WEBHOOK_URL:
+        return False
+    try:
+        resp = requests.post(config.DISCORD_WEBHOOK_URL, json={"embeds": embeds[:10]}, timeout=15)
+        resp.raise_for_status()
+        return True
+    except requests.RequestException as exc:
+        log.error("Discord embed send failed: %s", exc)
+        return False
+
+
+def send_alert(text_message: str, embeds=None):
+    """Prefer a Discord embed when available, else text, else console."""
     sent = False
-    if send_telegram(message):
-        sent = True
-        log.info("Alert sent to Telegram.")
-    if send_discord(message):
-        sent = True
-        log.info("Alert sent to Discord.")
+    if embeds and config.DISCORD_WEBHOOK_URL:
+        sent = send_discord_embeds(embeds)
+    elif config.DISCORD_WEBHOOK_URL:
+        sent = send_discord_text(text_message)
+    if config.TELEGRAM_BOT_TOKEN and config.TELEGRAM_CHAT_ID:
+        sent = send_telegram(text_message) or sent
     if not sent:
         print("\n" + "=" * 64)
-        print(message)
+        print(text_message)
         print("=" * 64 + "\n")
